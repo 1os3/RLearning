@@ -379,12 +379,12 @@ def train():
                         elapsed_time=elapsed_time_tensor
                     )
                 # === 增加传递给模型的数据debug输出 ===
-                print('[DEBUG][model input] stacked_state:', type(stacked_state), stacked_state.shape if hasattr(stacked_state, 'shape') else None)
-                print('[DEBUG][model input] lowdim:', type(lowdim), lowdim.shape if hasattr(lowdim, 'shape') else None)
-                print('[DEBUG][model input] delta_pos:', type(delta_pos), delta_pos.shape if hasattr(delta_pos, 'shape') else None)
-                print('[DEBUG][model input] target_pos:', type(target_pos), target_pos)
-                print('[DEBUG][model input] elapsed_time:', type(elapsed_time), elapsed_time.shape if hasattr(elapsed_time, 'shape') else None, elapsed_time)
-                print('[DEBUG][pos]', info.get('x'), info.get('y'), info.get('z'))
+                #print('[DEBUG][model input] stacked_state:', type(stacked_state), stacked_state.shape if hasattr(stacked_state, 'shape') else None)
+                #print('[DEBUG][model input] lowdim:', type(lowdim), lowdim.shape if hasattr(lowdim, 'shape') else None)
+                #print('[DEBUG][model input] delta_pos:', type(delta_pos), delta_pos.shape if hasattr(delta_pos, 'shape') else None)
+                #print('[DEBUG][model input] target_pos:', type(target_pos), target_pos)
+                #print('[DEBUG][model input] elapsed_time:', type(elapsed_time), elapsed_time.shape if hasattr(elapsed_time, 'shape') else None, elapsed_time)
+                #print('[DEBUG][pos]', info.get('x'), info.get('y'), info.get('z'))
                 action = agent.select_action(out, epsilon)
                 vx, vy, vz = action if len(action) == 3 else (0.0, 0.0, 0.0)
                 env.step(vx, vy, vz)
