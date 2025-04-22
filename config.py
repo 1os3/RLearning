@@ -33,14 +33,14 @@ CONFIG = {
     'REWARD_Z_TARGET': -2.0,     # 理想高度
     'REWARD_Z_SCALE': 0.1,       # 高度偏离惩罚系数
     'REWARD_ATTITUDE_SCALE': 0.05, # 姿态偏离惩罚系数
-    'PENALTY_COLLISION': -5.0,   # 碰撞惩罚
+    'PENALTY_COLLISION': -10.0,   # 碰撞惩罚
     'PENALTY_OFFROAD': -2.0,     # 偏离航线
     'PENALTY_SLOW': -2.0,        # 速度过慢惩罚（加大惩罚力度）
     'PENALTY_STATIC': -5.0,      # 连续静止惩罚（加大惩罚力度）
     'PENALTY_REPEAT_TRAJ': -2.0, # 震荡/小圈惩罚
     'PENALTY_ACTION_SWITCH': -1.0, # 动作切换频繁惩罚
     'PENALTY_NO_MOVE': -20.0,    # 5分钟内未移动超过10m惩罚
-    'REWARD_APPROACH_MAX': 20.0,    # 靠近目标点方向速度最高奖励
+    'REWARD_APPROACH_MAX': 10.0,    # 靠近目标点方向速度最高奖励
     'PENALTY_AWAY_SCALE': 3.0,       # 远离目标点方向速度惩罚线性系数
 
     # 任务相关参数（目标点采样与奖励归一化）
