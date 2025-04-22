@@ -338,6 +338,12 @@ def train():
                 if float(info['distance']) < 1.0:
                     total_reward += 20.0
                     done = True
+                    # 到达目标点，自动保存模型和训练状态并优雅退出
+                    print(f'[Train] 已到达目标点，保存模型与训练状态并退出')
+                    agent.save(CONFIG['MODEL_PATH'])
+                    save_train_state(replay, train_step, ep, epsilon, best_reward, CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth'))
+                    import sys
+                    sys.exit(0)
                 else:
                     done = False
                 reward = calc_reward(info, last_info, context, config=reward_scheduler.config, step_count=step_count)
