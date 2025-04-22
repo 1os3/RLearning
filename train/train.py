@@ -338,8 +338,8 @@ def train():
                 # === 1. 采集低维状态 ===
                 info = env.get_info(target_pos=context['target_pos']) if hasattr(env, 'get_info') else {}
                 # === DEBUG: 打印所有target_pos类型和值 ===
-                print('[DEBUG] context[target_pos] type:', type(context['target_pos']), context['target_pos'])
-                print('[DEBUG] info[target_pos] type:', type(info.get('target_pos', None)), info.get('target_pos', None))
+                #print('[DEBUG] context[target_pos] type:', type(context['target_pos']), context['target_pos'])
+                #print('[DEBUG] info[target_pos] type:', type(info.get('target_pos', None)), info.get('target_pos', None))
                 # === 2. 低维状态 ===
                 lowdim_keys = ['speed','x','y','z','pitch','roll','yaw']
                 lowdim = np.array([float(info.get(k,0)) for k in lowdim_keys], dtype=np.float32)
