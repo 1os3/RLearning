@@ -254,7 +254,10 @@ def train():
                 'repeat_traj': False,
                 'action_switch': False,
                 'total_distance': 0.0,
-                'collision_count': 0
+                'collision_count': 0,
+                # 新增静止检测字段
+                'no_move_start_time': None,
+                'no_move_distance': 0.0
             }
             speeds, positions, actions, collisions = [], [], [], []
             min_dist = float('inf')
@@ -279,6 +282,19 @@ def train():
                 context['repeat_traj'] = check_repeat_traj(positions, CONFIG)
                 context['action_switch'] = check_action_switch(actions, CONFIG)
                 context['collision_count'] = sum(collisions[-CONFIG['COLLISION_REPEAT_WINDOW']:])
+                # 静止检测逻辑
+                if float(info['speed']) < 0.05:
+                    if context['no_move_start_time'] is None:
+                        context['no_move_start_time'] = time.time()
+                        context['no_move_distance'] = 0.0
+                    else:
+                        # 计算相邻两步距离
+                        if len(positions) > 1:
+                            d = np.linalg.norm(np.array(positions[-1]) - np.array(positions[-2]))
+                            context['no_move_distance'] += d
+                else:
+                    context['no_move_start_time'] = None
+                    context['no_move_distance'] = 0.0
                 # 距离进步检测
                 cur_dist = float(info.get('distance', 1e6))
                 if cur_dist < min_dist - 0.1:
@@ -290,9 +306,11 @@ def train():
                 if no_progress_steps > 500:
                     print(f'[Train] 连续500步距离未减小，提前终止本集')
                     break
-                # 终止条件2：超过5分钟速度为0
-                if context['static_steps'] > CONFIG.get('NO_MOVE_WINDOW', 300):
-                    print(f'[Train] 超过5分钟未移动，提前终止本集')
+                # 终止条件2：静止超时且累计移动距离过小
+                if (context['no_move_start_time'] is not None and
+                    (time.time() - context['no_move_start_time'] > CONFIG.get('NO_MOVE_WINDOW', 300)) and
+                    (context['no_move_distance'] < CONFIG.get('NO_MOVE_DIST', 10.0))):
+                    print(f'[Train] 超过{CONFIG.get("NO_MOVE_WINDOW", 300)}秒累计未移动{CONFIG.get("NO_MOVE_DIST", 10.0)}米，提前终止本集')
                     break
                 # 终止条件3：loss爆炸
                 if len(losses) > 0 and (np.isnan(losses[-1]) or losses[-1] > 1e4):
@@ -380,6 +398,9 @@ def train():
                     epsilon = max(eps_min, epsilon * CONFIG['EPSILON_DECAY'])
                 if done:
                     break
+                # 自动保存模型，每200步
+                if (step_count + 1) % 200 == 0:
+                    save_train_state(replay, step_count + 1, ep, epsilon, best_reward, CONFIG['TRAIN_STATE_PATH'])
             # episode级别日志
             if len(losses) > 0:
                 writer.add_scalar('Loss/episode_avg', np.mean(losses), ep)
@@ -389,8 +410,15 @@ def train():
                 best_reward = total_reward
                 agent.save(CONFIG['MODEL_PATH'])
             if (ep + 1) % 200 == 0:
+                # 保存模型和训练状态快照
                 agent.save(CONFIG['MODEL_PATH'].replace('.pth', f'_ep{ep+1}.pth'))
                 save_train_state(replay, step_count, ep, epsilon, best_reward, train_state_path.replace('.pth', f'_ep{ep+1}.pth'))
+                # 额外复制一份模型到独立目录（如snapshots/）
+                import shutil
+                snap_dir = os.path.join(os.path.dirname(CONFIG['MODEL_PATH']), 'snapshots')
+                os.makedirs(snap_dir, exist_ok=True)
+                snap_path = os.path.join(snap_dir, f'model_ep{ep+1}.pth')
+                shutil.copy(CONFIG['MODEL_PATH'], snap_path)
             save_train_state(replay, step_count, ep, epsilon, best_reward, train_state_path)
             gc.collect()
             if hasattr(torch, 'xpu'):
