@@ -27,7 +27,7 @@ CONFIG = {
 
     # 奖励机制（无人机专用，已更新）
     'REWARD_ALIVE': 0.1,         # 存活奖励
-    'REWARD_DISTANCE': 2.0,      # 距离目标奖励（距离越近奖励越高）
+    'REWARD_DISTANCE': 3.0,      # 距离目标奖励（调低，防止静止时高reward）
     'REWARD_SPEED_TARGET': 1.0,  # 目标速度（适中速度）
     'REWARD_SPEED_SCALE': 0.2,   # 速度偏离惩罚系数
     'REWARD_Z_TARGET': -2.0,     # 理想高度
@@ -35,18 +35,18 @@ CONFIG = {
     'REWARD_ATTITUDE_SCALE': 0.05, # 姿态偏离惩罚系数
     'PENALTY_COLLISION': -10.0,   # 碰撞惩罚
     'PENALTY_OFFROAD': -2.0,     # 偏离航线
-    'PENALTY_SLOW': -2.0,        # 速度过慢惩罚（加大惩罚力度）
-    'PENALTY_STATIC': -5.0,      # 连续静止惩罚（加大惩罚力度）
+    'PENALTY_SLOW': -10.0,        # 速度过慢惩罚（大幅提升）
+    'PENALTY_STATIC': -20.0,      # 连续静止惩罚（大幅提升）
     'PENALTY_REPEAT_TRAJ': -2.0, # 震荡/小圈惩罚
     'PENALTY_ACTION_SWITCH': -1.0, # 动作切换频繁惩罚
     'PENALTY_NO_MOVE': -20.0,    # 5分钟内未移动超过10m惩罚
-    'REWARD_APPROACH_MAX': 10.0,    # 靠近目标点方向速度最高奖励
-    'PENALTY_AWAY_SCALE': 3.0,       # 远离目标点方向速度惩罚线性系数
+    'REWARD_APPROACH_MAX': 10.0,    # 靠近目标点方向速度最高奖励（大幅提升）
+    'PENALTY_AWAY_SCALE': 10.0,     # 远离目标点方向速度惩罚（大幅提升）
 
     # 任务相关参数（目标点采样与奖励归一化）
     'TARGET_DIST_MIN': 10.0,        # 目标点采样最小距离
-    'TARGET_DIST_MAX': 2000.0,      # 目标点采样最大距离（与train.py一致）
-    'REWARD_DISTANCE_MAX': 2000.0,  # 距离奖励归一化分母，必须与采样最大距离一致
+    'TARGET_DIST_MAX': 200.0,      # 目标点采样最大距离（与train.py一致）
+    'REWARD_DISTANCE_MAX': 200.0,  # 距离奖励归一化分母，必须与采样最大距离一致
     'REWARD_SPEED_NORM': 5.0,       # 速度归一化分母
     'REWARD_APPROACH_MAX_SPEED': 5.0, # 靠近目标奖励归一化分母
 

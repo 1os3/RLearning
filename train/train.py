@@ -1,19 +1,19 @@
 import os
 import torch
 import numpy as np
-from env.airsim_env import AirSimVisionEnv
-from agent.vision_agent import VisionLNNAgent
-from utils.vision_utils import preprocess_image, stack_state
-from config import CONFIG
 import random
 import time
 from collections import deque
-from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
+from config import CONFIG
+from env.airsim_env import AirSimVisionEnv
+from agent.vision_agent import VisionLNNAgent
+from utils.vision_utils import preprocess_image, stack_state
 from utils.amp_utils import autocast_xpu
 import gc
 
+# ===================== 1. 经验回放池 =====================
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
@@ -21,11 +21,24 @@ class ReplayBuffer:
         self.buffer.append(tuple(transition))
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        # 兼容拓展：state, action, reward, next_state, delta_pos, target_pos, elapsed_time, lowdim, done
-        return map(np.array, zip(*batch))
+        fields = list(zip(*batch))
+        result = []
+        for i, field in enumerate(fields):
+            # 第0项是stacked_state，需保持shape为(batch, C, H, W)
+            if i == 0:
+                arr = np.stack(field)
+            else:
+                arr = np.array(field)
+                if arr.dtype == np.object_:
+                    arr = np.asarray(list(arr), dtype=np.float32)
+                else:
+                    arr = arr.astype(np.float32)
+            result.append(arr)
+        return result
     def __len__(self):
         return len(self.buffer)
 
+# ===================== 2. 奖励调度器 =====================
 class RewardScheduler:
     def __init__(self, initial_config):
         self.config = initial_config.copy()
@@ -40,65 +53,44 @@ class RewardScheduler:
             return
         avg_reward = np.mean([r for r, _ in self.history])
         avg_approach = np.mean([a for _, a in self.history])
-        # 策略1: 靠近目标奖励低则提升REWARD_APPROACH_MAX
         if avg_approach < 0.5:
             self.config['REWARD_APPROACH_MAX'] = min(self.config['REWARD_APPROACH_MAX'] + 1, 20)
-        # 策略2: 总reward低则加大静止惩罚
         if avg_reward < 0:
             self.config['PENALTY_STATIC'] = min(self.config['PENALTY_STATIC'] - 1, -20)
     def get(self, key):
         return self.config.get(key)
 
+# ===================== 3. 奖励函数 =====================
 def calc_reward(info, last_info=None, context=None, config=CONFIG, step_count=None):
     reward = config['REWARD_ALIVE']
-    # 距离目标点奖励（归一化）
     distance = float(info.get('distance', 1))
-    # === Reward相关debug输出暂时注释 ===
-    # print('[DEBUG][reward] info[x]:', type(info.get('x', 0)), info.get('x', 0))
-    # print('[DEBUG][reward] last_info[x]:', type(last_info.get('x', 0)) if last_info else None, last_info.get('x', 0) if last_info else None)
-    # print('[DEBUG][reward] info[y]:', type(info.get('y', 0)), info.get('y', 0))
-    # print('[DEBUG][reward] last_info[y]:', type(last_info.get('y', 0)) if last_info else None, last_info.get('y', 0) if last_info else None)
-    # print('[DEBUG][reward] info[z]:', type(info.get('z', 0)), info.get('z', 0))
-    # print('[DEBUG][reward] last_info[z]:', type(last_info.get('z', 0)) if last_info else None, last_info.get('z', 0) if last_info else None)
-    reward += config['REWARD_DISTANCE'] * max(0, config['REWARD_DISTANCE_MAX'] - distance) / config['REWARD_DISTANCE_MAX']
-    # 速度偏离惩罚
+    # 距离奖励用平方递增，靠近目标更有动力
+    reward += config['REWARD_DISTANCE'] * ((max(0, config['REWARD_DISTANCE_MAX'] - distance) / config['REWARD_DISTANCE_MAX']) ** 2)
     speed = float(info.get('speed', 0))
     if speed < config['REWARD_SPEED_TARGET']:
         reward -= abs(speed - config['REWARD_SPEED_TARGET']) * config['REWARD_SPEED_SCALE']
-    # 高度偏离惩罚
     z = float(info.get('z', config['REWARD_Z_TARGET']))
     reward -= abs(z - config['REWARD_Z_TARGET']) * config['REWARD_Z_SCALE']
-    # 姿态偏离惩罚
     pitch = abs(float(info.get('pitch', 0)))
     roll = abs(float(info.get('roll', 0)))
     reward -= (pitch + roll) * config['REWARD_ATTITUDE_SCALE']
-    # 碰撞惩罚
     if info.get('collision', False):
         reward += config['PENALTY_COLLISION']
-    # 偏离航线惩罚
     if info.get('offroad', False):
         reward += config['PENALTY_OFFROAD']
-    # 速度过慢惩罚
+    # 静止与慢速惩罚强化
     if speed < 0.1:
         reward += config['PENALTY_SLOW']
-    # === 新增：鼓励持续运动 ===
-    if abs(info.get('speed', 0)) > 0.05:
-        reward += 0.1  # 鼓励有位移
-    # === 静止惩罚 ===
     if abs(info.get('speed', 0)) < 0.05:
-        reward += config.get('PENALTY_STATIC', -5.0)
-    # 震荡/小圈惩罚
-    if context is not None and 'repeat_traj' in context and context['repeat_traj']:
+        reward += config.get('PENALTY_STATIC', -20.0)
+    if context is not None and context.get('repeat_traj', False):
         reward += config.get('PENALTY_REPEAT_TRAJ', -10.0)
-    # 动作切换频繁惩罚
-    if context is not None and 'action_switch' in context and context['action_switch']:
+    if context is not None and context.get('action_switch', False):
         reward += config.get('PENALTY_ACTION_SWITCH', -1.0)
-    # 速度奖励：越快奖励越接近REWARD_SPEED_MAX，最高为REWARD_SPEED_MAX
-    max_speed = config['REWARD_SPEED_NORM']  # 可根据动作空间调整
+    max_speed = config['REWARD_SPEED_NORM']
     speed_reward = min(speed, max_speed) / max_speed * config.get('REWARD_SPEED_MAX', 2.0)
     reward += speed_reward
     # 靠近目标点方向速度奖励/惩罚
-    # 计算无人机指向目标点的单位向量与速度矢量投影
     if last_info is not None and context is not None and 'target_pos' in context:
         pos = np.array([float(info.get('x', 0)), float(info.get('y', 0)), float(info.get('z', 0))])
         last_pos = np.array([float(last_info.get('x', 0)), float(last_info.get('y', 0)), float(last_info.get('z', 0))])
@@ -109,45 +101,23 @@ def calc_reward(info, last_info=None, context=None, config=CONFIG, step_count=No
         v_proj = np.dot(v_vec, to_target_unit)
         max_proj_speed = config['REWARD_APPROACH_MAX_SPEED']
         if v_proj > 0:
-            # 靠近目标点，奖励线性递增，最高2分
-            approach_reward = min(v_proj, max_proj_speed) / max_proj_speed * config.get('REWARD_APPROACH_MAX', 8.0)
+            approach_reward = min(v_proj, max_proj_speed) / max_proj_speed * config.get('REWARD_APPROACH_MAX', 10.0)
         else:
-            # 远离目标点，惩罚与远离速度线性相关，无上限
-            approach_reward = v_proj * config.get('PENALTY_AWAY_SCALE',6.0)
+            approach_reward = v_proj * config.get('PENALTY_AWAY_SCALE', 10.0)
         reward += approach_reward
-    # === 5min内未移动超过10m惩罚 ===
-    if 'pos_history' not in context:
-        context['pos_history'] = []
-    if 'time_history' not in context:
-        context['time_history'] = []
-    cur_pos = np.array([float(info.get('x', 0)), float(info.get('y', 0)), float(info.get('z', 0))], dtype=np.float32)
-    cur_time = time.time()
-    context['pos_history'].append(cur_pos)
-    context['time_history'].append(cur_time)
-    # 只保留最近5分钟数据
-    while context['time_history'] and cur_time - context['time_history'][0] > 300:
-        context['time_history'].pop(0)
-        context['pos_history'].pop(0)
-    if context['time_history'] and cur_time - context['time_history'][0] >= 300:
-        dist = np.linalg.norm(cur_pos - context['pos_history'][0])
-        if dist < 10.0:
-            reward += config.get('PENALTY_NO_MOVE', -20.0)
-            if step_count is not None and step_count % 100 == 0:
-                print(f'[惩罚] 5分钟内未移动超过10m，距离={dist:.2f}，已施加惩罚')
     return reward
 
+# ===================== 4. 辅助判定 =====================
 def check_static(speeds, config):
-    # 检查最近STATIC_STEPS步内是否静止
     return all(s < 0.05 for s in speeds[-config['STATIC_STEPS']:]) if len(speeds) >= config['STATIC_STEPS'] else False
 
 def check_repeat_traj(positions, config):
-    # 检查最近REPEAT_TRAJ_WINDOW步内是否有位置重复（小圈）
     if len(positions) < config['REPEAT_TRAJ_WINDOW']:
         return False
     recent = positions[-config['REPEAT_TRAJ_WINDOW']:]
     arr = np.array(recent)
     dists = np.linalg.norm(arr - arr[-1], axis=1)
-    return np.sum(dists < 0.5) > 3  # 0.5米内重复超过3次
+    return np.sum(dists < 0.5) > 3
 
 def check_action_switch(actions, config):
     if len(actions) < config['ACTION_SWITCH_WINDOW']:
@@ -156,59 +126,28 @@ def check_action_switch(actions, config):
     return len(set(recent)) > 2
 
 def check_collision_repeat(collisions, config):
-    # 检查最近COLLISION_REPEAT_WINDOW步内碰撞次数
     return sum(collisions[-config['COLLISION_REPEAT_WINDOW']:]) > 1
 
-def get_scheduler(optimizer):
-    sched_conf = CONFIG['LR_SCHEDULER']
-    if sched_conf['type'] == 'ReduceLROnPlateau':
-        # verbose参数不支持，需移除
-        return ReduceLROnPlateau(optimizer, factor=sched_conf['factor'], patience=sched_conf['patience'], min_lr=sched_conf['min_lr'], mode=sched_conf['mode'])
-    elif sched_conf['type'] == 'StepLR':
-        return StepLR(optimizer, step_size=sched_conf.get('step_size', 20), gamma=sched_conf.get('factor', 0.5))
-    elif sched_conf['type'] == 'CosineAnnealingLR':
-        return CosineAnnealingLR(optimizer, T_max=sched_conf.get('T_max', 100), eta_min=sched_conf.get('min_lr', 1e-6))
-    else:
-        return None
+# ===================== 5. 训练状态保存/恢复 =====================
+def save_train_state(replay, step_count, ep, epsilon, best_reward, path):
+    torch.save({
+        'replay': replay.buffer,
+        'step_count': step_count,
+        'episode': ep,
+        'epsilon': epsilon,
+        'best_reward': best_reward
+    }, path)
+    print(f'[Train] 已保存训练状态到 {path}')
 
-def build_reward_items(info, last_info, context, reward_scheduler, CONFIG):
-    reward_items = {}
-    distance = float(info.get('distance', 1))
-    speed = float(info.get('speed', 0))
-    z = float(info.get('z', CONFIG['REWARD_Z_TARGET']))
-    pitch = abs(float(info.get('pitch', 0)))
-    roll = abs(float(info.get('roll', 0)))
-    reward_items['alive'] = reward_scheduler.config['REWARD_ALIVE']
-    reward_items['distance'] = reward_scheduler.config['REWARD_DISTANCE'] * max(0, CONFIG['REWARD_DISTANCE_MAX'] - distance) / CONFIG['REWARD_DISTANCE_MAX']
-    reward_items['speed_penalty'] = -abs(speed - reward_scheduler.config['REWARD_SPEED_TARGET']) * reward_scheduler.config['REWARD_SPEED_SCALE'] if speed < reward_scheduler.config['REWARD_SPEED_TARGET'] else 0.0
-    reward_items['z_penalty'] = -abs(z - reward_scheduler.config['REWARD_Z_TARGET']) * reward_scheduler.config['REWARD_Z_SCALE']
-    reward_items['attitude_penalty'] = -(pitch + roll) * reward_scheduler.config['REWARD_ATTITUDE_SCALE']
-    reward_items['collision'] = reward_scheduler.config['PENALTY_COLLISION'] if info.get('collision', False) else 0.0
-    reward_items['offroad'] = reward_scheduler.config['PENALTY_OFFROAD'] if info.get('offroad', False) else 0.0
-    reward_items['slow'] = reward_scheduler.config['PENALTY_SLOW'] if speed < 0.1 else 0.0
-    reward_items['static'] = reward_scheduler.config['PENALTY_STATIC'] if context and 'static_steps' in context and context['static_steps'] >= 10 else 0.0
-    reward_items['repeat_traj'] = reward_scheduler.config.get('PENALTY_REPEAT_TRAJ', -10.0) if context is not None and 'repeat_traj' in context and context['repeat_traj'] else 0.0
-    reward_items['action_switch'] = reward_scheduler.config.get('PENALTY_ACTION_SWITCH', -1.0) if context is not None and 'action_switch' in context and context['action_switch'] else 0.0
-    max_speed = CONFIG['REWARD_SPEED_NORM']
-    reward_items['speed_reward'] = min(speed, max_speed) / max_speed * reward_scheduler.config.get('REWARD_SPEED_MAX', 2.0)
-    # 靠近目标奖励
-    if last_info is not None and context is not None and 'target_pos' in context:
-        pos = np.array([float(info.get('x', 0)), float(info.get('y', 0)), float(info.get('z', 0))])
-        last_pos = np.array([float(last_info.get('x', 0)), float(last_info.get('y', 0)), float(last_info.get('z', 0))])
-        tgt = np.array([float(v) for v in context['target_pos']])
-        to_target_vec = tgt - pos
-        to_target_unit = to_target_vec / (np.linalg.norm(to_target_vec) + 1e-8)
-        v_vec = pos - last_pos
-        v_proj = np.dot(v_vec, to_target_unit)
-        max_proj_speed = CONFIG['REWARD_APPROACH_MAX_SPEED']
-        if v_proj > 0:
-            reward_items['approach_reward'] = min(v_proj, max_proj_speed) / max_proj_speed * reward_scheduler.config.get('REWARD_APPROACH_MAX', 8.0)
-        else:
-            reward_items['approach_reward'] = v_proj * reward_scheduler.config.get('PENALTY_AWAY_SCALE', 6.0)
-    else:
-        reward_items['approach_reward'] = 0.0
-    return reward_items
+def load_train_state(replay, path):
+    if os.path.exists(path):
+        state = torch.load(path)
+        replay.buffer = state['replay']
+        print(f'[Train] 已恢复训练状态: episode={state["episode"]}, step={state["step_count"]}, epsilon={state["epsilon"]}')
+        return state['step_count'], state['episode'], state['epsilon'], state['best_reward']
+    return 0, 0, CONFIG['EPSILON_START'], -float('inf')
 
+# ===================== 6. 日志与TensorBoard =====================
 def write_reward_items(writer, reward_items, step_count):
     for k, v in reward_items.items():
         writer.add_scalar(f'RewardItems/{k}', v, step_count)
@@ -219,8 +158,46 @@ def log_warnings(info, ep, step_count):
     if info.get('offroad', False):
         print(f'[警告] 第{ep+1}集第{step_count}步偏离航线')
 
+# ===================== 7. 状态采集与预处理 =====================
+def collect_state(env, context, state_list):
+    info = env.get_info(target_pos=context['target_pos']) if hasattr(env, 'get_info') else {}
+    lowdim_keys = ['speed','x','y','z','pitch','roll','yaw']
+    lowdim = np.array([float(info.get(k,0)) for k in lowdim_keys], dtype=np.float32)
+    lowdim_tensor = torch.from_numpy(lowdim).unsqueeze(0)
+    cur_pos = np.array([float(info.get('x', 0)), float(info.get('y', 0)), float(info.get('z', 0))], dtype=np.float32)
+    delta_pos = cur_pos - np.array(context['init_pos'], dtype=np.float32)
+    delta_pos_tensor = torch.from_numpy(delta_pos).unsqueeze(0)
+    target_pos_tensor = torch.from_numpy(np.array(context['target_pos'], dtype=np.float32)).unsqueeze(0)
+    elapsed_time = np.array([time.time() - context['start_time']], dtype=np.float32)
+    elapsed_time_tensor = torch.from_numpy(elapsed_time).unsqueeze(0)
+    img = env.get_image()
+    state = preprocess_image(img)
+    state_list.pop(0)
+    state_list.append(state)
+    stacked_state = stack_state(state_list)
+    return (stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, info)
+
+# ===================== 8. 模型推理与动作选择 =====================
+def select_action(agent, stacked_state, epsilon, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None):
+    return agent.select_action(stacked_state, epsilon, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time)
+
+# ===================== 9. 训练主循环 =====================
+# ===================== 学习率调度器 =====================
+def get_scheduler(optimizer):
+    sched_conf = CONFIG['LR_SCHEDULER']
+    if sched_conf['type'] == 'ReduceLROnPlateau':
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+        return ReduceLROnPlateau(optimizer, factor=sched_conf['factor'], patience=sched_conf['patience'], min_lr=sched_conf['min_lr'], mode=sched_conf['mode'])
+    elif sched_conf['type'] == 'StepLR':
+        from torch.optim.lr_scheduler import StepLR
+        return StepLR(optimizer, step_size=sched_conf.get('step_size', 20), gamma=sched_conf.get('factor', 0.5))
+    elif sched_conf['type'] == 'CosineAnnealingLR':
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        return CosineAnnealingLR(optimizer, T_max=sched_conf.get('T_max', 100), eta_min=sched_conf.get('min_lr', 1e-6))
+    else:
+        return None
+
 def train():
-    # 设置随机种子以保证可复现
     seed = CONFIG.get('SEED', 42)
     random.seed(seed)
     np.random.seed(seed)
@@ -229,130 +206,72 @@ def train():
         torch.cuda.manual_seed_all(seed)
 
     env = AirSimVisionEnv()
-    # 设备配置，优先xpu，其次cuda，最后cpu
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        device = torch.device("xpu")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    # 采样一组stack_state，推断真实shape
+    device = torch.device("xpu") if hasattr(torch, "xpu") and torch.xpu.is_available() else (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
     img = env.get_image()
     state = preprocess_image(img)
     state_list = [state for _ in range(CONFIG['STACK_SIZE'])]
     stacked_state = stack_state(state_list)
-    print('stacked_state.shape:', stacked_state.shape)
-    # 低维状态shape推断
     sample_info = env.get_info() if hasattr(env, 'get_info') else {}
     lowdim_keys = ['speed','x','y','z','pitch','roll','yaw']
     lowdim_dim = len([k for k in lowdim_keys if k in sample_info]) if sample_info else 9
     agent = VisionLNNAgent(input_shape=stacked_state.shape, action_dim=3, lowdim_dim=lowdim_dim, device=device)
     replay = ReplayBuffer(CONFIG['REPLAY_BUFFER_SIZE'])
     epsilon = CONFIG['EPSILON_START']
-    gamma = CONFIG['GAMMA']
     best_reward = -float('inf')
     start_ep = 0
-    if os.path.exists(CONFIG['MODEL_PATH']):
+    train_state_path = CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth')
+    if os.path.exists(train_state_path):
+        step_count, start_ep, epsilon, best_reward = load_train_state(replay, train_state_path)
+    elif os.path.exists(CONFIG['MODEL_PATH']):
         agent.load(CONFIG['MODEL_PATH'])
         print(f"[Train] 加载断点模型: {CONFIG['MODEL_PATH']}")
     os.makedirs(os.path.dirname(CONFIG['MODEL_PATH']), exist_ok=True)
-    scheduler = get_scheduler(agent.optimizer)
+    scheduler = None
+    if hasattr(agent, 'optimizer'):
+        scheduler = get_scheduler(agent.optimizer)
     writer = SummaryWriter(log_dir="runs/lnn_rl")
-
     reward_scheduler = RewardScheduler(CONFIG.copy())
-
+    train_step = 0  # 训练全局步数
     for ep in trange(start_ep, CONFIG['MAX_EPISODES'], desc="Episode"):
         try:
             env.reset()
             agent.reset_state()
-            state_list = []
-            img = env.get_image()
-            state = preprocess_image(img)
-            for _ in range(CONFIG['STACK_SIZE']):
-                state_list.append(state)
+            state_list = [state for _ in range(CONFIG['STACK_SIZE'])]
             stacked_state = stack_state(state_list)
             total_reward = 0
             done = False
             last_info = None
             losses = []
-            # 目标点：episode开始时唯一确定
             drone_init_info = env.get_info()
             drone_init_pos = [float(drone_init_info['x']), float(drone_init_info['y']), float(drone_init_info['z'])]
-            target_pos = [drone_init_pos[0] + 20.0, drone_init_pos[1], drone_init_pos[2] + 2.0]
+            target_pos = [drone_init_pos[0] + 200.0, drone_init_pos[1], drone_init_pos[2] + 2.0]
             context = {
-                'last_distance': 1.0,
-                'total_distance': 0.0,
-                'static_steps': 0,
-                'repeat_traj': False,
-                'collision_count': 0,
-                'action_switch': False,
+                'target_pos': target_pos,
                 'init_pos': drone_init_pos,
                 'start_time': time.time(),
-                'target_pos': target_pos
+                'static_steps': 0,
+                'repeat_traj': False,
+                'action_switch': False,
+                'total_distance': 0.0,
+                'collision_count': 0
             }
             speeds, positions, actions, collisions = [], [], [], []
-            step_count = 0
-            while True:
-                # === 1. 采集低维状态 ===
-                info = env.get_info(target_pos=context['target_pos']) if hasattr(env, 'get_info') else {}
-                # === DEBUG: 打印所有target_pos类型和值 ===
-                #print('[DEBUG] context[target_pos] type:', type(context['target_pos']), context['target_pos'])
-                #print('[DEBUG] info[target_pos] type:', type(info.get('target_pos', None)), info.get('target_pos', None))
-                # === 2. 低维状态 ===
-                lowdim_keys = ['speed','x','y','z','pitch','roll','yaw']
-                lowdim = np.array([float(info.get(k,0)) for k in lowdim_keys], dtype=np.float32)
-                lowdim_tensor = torch.from_numpy(lowdim).unsqueeze(0)  # (1, lowdim_dim)
-                # === 新增：相对初始点位移、目标点坐标、已用时间 ===
-                try:
-                    cur_pos = np.array([
-                        float(info.get('x', 0)),
-                        float(info.get('y', 0)),
-                        float(info.get('z', 0))
-                    ], dtype=np.float32)
-                    delta_pos = cur_pos - np.array(context['init_pos'], dtype=np.float32)
-                except Exception as e:
-                    print('[ERROR] delta_pos异常:', type(cur_pos), cur_pos, type(context['init_pos']), context['init_pos'], e)
-                    raise
-                try:
-                    delta_pos_tensor = torch.from_numpy(delta_pos).unsqueeze(0)
-                    target_pos_tensor = torch.from_numpy(np.array(context['target_pos'], dtype=np.float32)).unsqueeze(0)
-                except Exception as e:
-                    print('[ERROR] target_pos_tensor异常:', type(context['target_pos']), context['target_pos'], e)
-                    raise
-                elapsed_time = np.array([time.time() - context['start_time']], dtype=np.float32)
-                elapsed_time_tensor = torch.from_numpy(elapsed_time).unsqueeze(0)
-                # === 3. 状态堆叠 ===
-                img = env.get_image()
-                state = preprocess_image(img)
-                state_list.pop(0)
-                state_list.append(state)
-                next_stacked_state = stack_state(state_list)
-                # === 4. 模型推理 ===
-                with autocast_xpu():
-                    out, _ = agent.forward(
-                        stacked_state.unsqueeze(0),
-                        lowdim=lowdim_tensor,
-                        delta_pos=delta_pos_tensor,
-                        target_pos=target_pos_tensor,
-                        elapsed_time=elapsed_time_tensor
-                    )
-                # === 增加传递给模型的数据debug输出 ===
-                #print('[DEBUG][model input] stacked_state:', type(stacked_state), stacked_state.shape if hasattr(stacked_state, 'shape') else None)
-                #print('[DEBUG][model input] lowdim:', type(lowdim), lowdim.shape if hasattr(lowdim, 'shape') else None)
-                #print('[DEBUG][model input] delta_pos:', type(delta_pos), delta_pos.shape if hasattr(delta_pos, 'shape') else None)
-                #print('[DEBUG][model input] target_pos:', type(target_pos), target_pos)
-                #print('[DEBUG][model input] elapsed_time:', type(elapsed_time), elapsed_time.shape if hasattr(elapsed_time, 'shape') else None, elapsed_time)
-                #print('[DEBUG][pos]', info.get('x'), info.get('y'), info.get('z'))
-                action = agent.select_action(out, epsilon)
-                vx, vy, vz = action if len(action) == 3 else (0.0, 0.0, 0.0)
+            min_dist = float('inf')
+            no_progress_steps = 0
+            for step_count in range(CONFIG['MAX_STEPS']):
+                prev_stacked_state = stacked_state.copy() if hasattr(stacked_state, 'copy') else np.copy(stacked_state)
+                stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, info = collect_state(env, context, state_list)
+                if isinstance(prev_stacked_state, np.ndarray):
+                    prev_stacked_state_tensor = torch.from_numpy(prev_stacked_state).to(device=device, dtype=torch.float32)
+                else:
+                    prev_stacked_state_tensor = prev_stacked_state.to(device=device, dtype=torch.float32)
+                action = select_action(agent, prev_stacked_state_tensor, epsilon, lowdim=lowdim_tensor, delta_pos=delta_pos_tensor, target_pos=target_pos_tensor, elapsed_time=elapsed_time_tensor)
+                vx, vy, vz = [float(x) for x in action] if len(action) == 3 else (0.0, 0.0, 0.0)
                 env.step(vx, vy, vz)
                 info = env.get_info(target_pos=context['target_pos'])
                 speeds.append(float(info['speed']))
-                positions.append([
-                    float(info['x']),
-                    float(info['y']),
-                    float(info['z'])
-                ])
+                positions.append([float(info['x']), float(info['y']), float(info['z'])])
                 actions.append(tuple(action))
                 collisions.append(int(info['collision']))
                 context['total_distance'] += float(info['speed'])
@@ -360,101 +279,125 @@ def train():
                 context['repeat_traj'] = check_repeat_traj(positions, CONFIG)
                 context['action_switch'] = check_action_switch(actions, CONFIG)
                 context['collision_count'] = sum(collisions[-CONFIG['COLLISION_REPEAT_WINDOW']:])
+                # 距离进步检测
+                cur_dist = float(info.get('distance', 1e6))
+                if cur_dist < min_dist - 0.1:
+                    min_dist = cur_dist
+                    no_progress_steps = 0
+                else:
+                    no_progress_steps += 1
+                # 终止条件1：500步距离无进步
+                if no_progress_steps > 500:
+                    print(f'[Train] 连续500步距离未减小，提前终止本集')
+                    break
+                # 终止条件2：超过5分钟速度为0
+                if context['static_steps'] > CONFIG.get('NO_MOVE_WINDOW', 300):
+                    print(f'[Train] 超过5分钟未移动，提前终止本集')
+                    break
+                # 终止条件3：loss爆炸
+                if len(losses) > 0 and (np.isnan(losses[-1]) or losses[-1] > 1e4):
+                    print(f'[Train] Loss爆炸，提前终止本集')
+                    break
                 if float(info['distance']) < 1.0:
                     total_reward += 20.0
+                    done = True
+                else:
+                    done = False
                 reward = calc_reward(info, last_info, context, config=reward_scheduler.config, step_count=step_count)
-                approach_reward = context.get('approach_reward', 0) if context else 0
-                reward_scheduler.update_metrics(reward, approach_reward)
-                if step_count % 1000 == 0:
-                    reward_scheduler.step()
-                last_info = info
-                action = np.asarray(action, dtype=np.float32)
-                assert action.shape == (agent.action_dim,), f"action shape error: {action.shape}"
-                # 经验回放拓展：存储全部新特征
-                replay.push(
-                    stacked_state.numpy(),
-                    action,
-                    reward,
-                    next_stacked_state.numpy(),
-                    delta_pos,
-                    [float(v) for v in context['target_pos']],
-                    elapsed_time,
-                    lowdim,
-                    False # done
-                )
                 total_reward += reward
-                stacked_state = next_stacked_state
-                step_count += 1
-                if step_count % 100 == 0:
-                    print(f"[Step {step_count}] Loss: {loss.item():.4f}, Reward: {reward:.2f}, Epsilon: {epsilon:.3f}, Speed: {float(info.get('speed', 0)):.2f}, Distance: {float(info.get('distance', 0)):.2f}, Collision: {info.get('collision', False)}")
-                reward_items = build_reward_items(info, last_info, context, reward_scheduler, CONFIG)
-                write_reward_items(writer, reward_items, step_count)
+                last_info = info.copy()
+                # 经验池推送
+                replay.push(prev_stacked_state, action, reward, stacked_state, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, lowdim_tensor, done)
+                # 视觉信息写入TensorBoard（每隔20步）
+                if train_step % 20 == 0 and isinstance(stacked_state, torch.Tensor):
+                    img_np = stacked_state[0].detach().cpu().numpy() if stacked_state.dim() == 4 else stacked_state.detach().cpu().numpy()
+                    img_np = img_np.astype(np.float32)
+                    img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
+                    # 兼容多帧堆叠与单帧RGB输入
+                    if img_np.ndim == 3:
+                        # 如果是多帧堆叠，取前三通道（RGB）
+                        if img_np.shape[0] > 3:
+                            img_np = img_np[:3, :, :]
+                        # 如果是单通道，重复三次
+                        elif img_np.shape[0] == 1:
+                            img_np = np.repeat(img_np, 3, axis=0)
+                    writer.add_image('Vision/state', img_np, train_step, dataformats='CHW')
+                # reward/loss写入TensorBoard（step全局唯一）
+                global_step = ep * CONFIG['MAX_STEPS'] + step_count
+                writer.add_scalar('Reward/step', reward, global_step)
+                writer.add_scalar('Reward/episode_cum', total_reward, global_step)
+                writer.add_scalar('Distance/step', info.get('distance', 0), global_step)
+                writer.add_scalar('Speed/step', info.get('speed', 0), global_step)
+                writer.add_scalar('Epsilon', epsilon, global_step)
+                reward_items = {
+                    'reward': reward,
+                    'distance': info.get('distance', 0),
+                    'speed': info.get('speed', 0),
+                    'static_steps': context['static_steps'],
+                    'total_reward': total_reward
+                }
+                write_reward_items(writer, reward_items, global_step)
                 log_warnings(info, ep, step_count)
-                if step_count % 10 == 0:
-                    writer.add_image('AI视觉输入', img.transpose(2, 0, 1), global_step=step_count, dataformats='CHW')
-                if step_count % 2 == 0 and len(replay) >= CONFIG['BATCH_SIZE']:
-                    try:
-                        b_s, b_a, b_r, b_ns, b_delta_pos, b_target_pos, b_elapsed_time, b_lowdim, b_d = zip(*random.sample(replay.buffer, CONFIG['BATCH_SIZE']))
-                    except Exception as e:
-                        print('[ERROR] batch采样异常:', e)
-                        raise
-                    try:
-                        b_target_pos_arr = np.array([list(map(float, x)) for x in b_target_pos], dtype=np.float32)
-                    except Exception as e:
-                        print('[ERROR] b_target_pos转float异常:', type(b_target_pos[0]), b_target_pos[0], e)
-                        raise
-                    try:
-                        b_s = torch.tensor(np.array(b_s), dtype=torch.float32, device=device)
-                        b_a = torch.tensor(np.array(b_a), dtype=torch.float32, device=device)
-                        b_r = torch.tensor(b_r, dtype=torch.float32, device=device)
-                        b_ns = torch.tensor(np.array(b_ns), dtype=torch.float32, device=device)
-                        b_delta_pos = torch.tensor(np.array(b_delta_pos), dtype=torch.float32, device=device)
-                        b_target_pos = torch.tensor(b_target_pos_arr, dtype=torch.float32, device=device)
-                        b_elapsed_time = torch.tensor(np.array(b_elapsed_time), dtype=torch.float32, device=device)
-                        b_lowdim = torch.tensor(np.array(b_lowdim), dtype=torch.float32, device=device)
-                        b_d = torch.tensor(b_d, dtype=torch.float32, device=device)
-                    except Exception as e:
-                        print('[ERROR] batch张量转换异常:', e)
-                        raise
-                    with autocast_xpu():
-                        with torch.no_grad():
-                            out, _ = agent.forward(b_ns, b_a, lowdim=b_lowdim, delta_pos=b_delta_pos, target_pos=b_target_pos, elapsed_time=b_elapsed_time)
-                            q_next = out["q"]
-                            q_target = b_r + gamma * (1 - b_d) * q_next.squeeze()
-                        loss = agent.compute_loss(b_s, b_a, q_target, lowdim=b_lowdim, delta_pos=b_delta_pos, target_pos=b_target_pos, elapsed_time=b_elapsed_time)
-                        agent.update(loss)
-                        losses.append(loss.detach().item())
-                if step_count % 100 == 0:
-                    agent.save(CONFIG['MODEL_PATH'])
+                print(f"[Ep {ep+1} | Step {step_count+1}] Reward: {reward:.2f}, TotalReward: {total_reward:.2f}, Epsilon: {epsilon:.4f}, Speed: {info.get('speed', 0):.2f}, Distance: {info.get('distance', 0):.2f}, Collision: {info.get('collision', False)}, Offroad: {info.get('offroad', False)}")
+                # 多步经验回放采样
+                train_times = 2
+                for _ in range(train_times):
+                    if len(replay) > CONFIG['BATCH_SIZE']:
+                        batch = replay.sample(CONFIG['BATCH_SIZE'])
+                        b_s, b_a, b_r, b_ns, b_delta_pos, b_target_pos, b_elapsed_time, b_lowdim, b_d = batch
+                        b_s = torch.from_numpy(b_s).to(device=device, dtype=torch.float32)
+                        b_a = torch.from_numpy(b_a).to(device=device, dtype=torch.float32)
+                        b_r = torch.from_numpy(b_r).to(device=device, dtype=torch.float32)
+                        b_ns = torch.from_numpy(b_ns).to(device=device, dtype=torch.float32) if b_ns is not None else None
+                        b_delta_pos = torch.from_numpy(b_delta_pos).to(device=device, dtype=torch.float32)
+                        b_target_pos = torch.from_numpy(b_target_pos).to(device=device, dtype=torch.float32)
+                        b_elapsed_time = torch.from_numpy(b_elapsed_time).to(device=device, dtype=torch.float32)
+                        b_lowdim = torch.from_numpy(b_lowdim).to(device=device, dtype=torch.float32)
+                        b_d = torch.from_numpy(b_d).to(device=device, dtype=torch.float32)
+                        with autocast_xpu():
+                            with torch.no_grad():
+                                out, _ = agent.forward(b_ns, lowdim=b_lowdim, delta_pos=b_delta_pos, target_pos=b_target_pos, elapsed_time=b_elapsed_time)
+                                q_next = out["q"] if isinstance(out, dict) and "q" in out else out
+                                q_target = b_r + CONFIG['GAMMA'] * (1 - b_d) * q_next.squeeze()
+                            out_pred, _ = agent.forward(b_s, lowdim=b_lowdim, delta_pos=b_delta_pos, target_pos=b_target_pos, elapsed_time=b_elapsed_time)
+                            q_pred = out_pred["q"] if isinstance(out_pred, dict) and "q" in out_pred else out_pred
+                            loss = torch.nn.functional.mse_loss(q_pred.squeeze(), q_target)
+                            if torch.isnan(loss) or loss.item() > 1e4:
+                                print(f'[Train] Loss异常，跳过本步')
+                                continue
+                            agent.optimizer.zero_grad()
+                            loss.backward()
+                            agent.optimizer.step()
+                            losses.append(loss.item())
+                            train_step += 1
+                            if train_step % 20 == 0:
+                                writer.add_scalar('Loss/train', loss.item(), train_step)
+                                writer.add_scalar('Q/mean', q_pred.mean().item(), train_step)
+                if hasattr(agent, 'update_epsilon'):
+                    epsilon = agent.update_epsilon(epsilon)
+                else:
+                    eps_min = CONFIG.get('EPSILON_MIN', CONFIG.get('EPSILON_END', 0.01))
+                    epsilon = max(eps_min, epsilon * CONFIG['EPSILON_DECAY'])
                 if done:
                     break
-            avg_loss = np.mean(losses) if losses else 0.0
-            lr = agent.optimizer.param_groups[0]['lr']
-            print(f"Episode {ep+1}/{CONFIG['MAX_EPISODES']}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}, LR: {lr:.6f}")
-            writer.add_scalar('Reward/Episode', total_reward, ep+1)
-            writer.add_scalar('Loss/Episode', avg_loss, ep+1)
-            writer.add_scalar('Epsilon/Episode', epsilon, ep+1)
-            writer.add_scalar('LearningRate/Episode', lr, ep+1)
-            epsilon = max(CONFIG['EPSILON_END'], epsilon * CONFIG['EPSILON_DECAY'])
-            if scheduler is not None:
-                if isinstance(scheduler, ReduceLROnPlateau):
-                    scheduler.step(total_reward)
-                else:
-                    scheduler.step()
+            # episode级别日志
+            if len(losses) > 0:
+                writer.add_scalar('Loss/episode_avg', np.mean(losses), ep)
+            writer.add_scalar('Reward/episode', total_reward, ep)
+            writer.add_scalar('Distance/episode_min', min_dist, ep)
             if total_reward > best_reward:
                 best_reward = total_reward
                 agent.save(CONFIG['MODEL_PATH'])
+            if (ep + 1) % 200 == 0:
+                agent.save(CONFIG['MODEL_PATH'].replace('.pth', f'_ep{ep+1}.pth'))
+                save_train_state(replay, step_count, ep, epsilon, best_reward, train_state_path.replace('.pth', f'_ep{ep+1}.pth'))
+            save_train_state(replay, step_count, ep, epsilon, best_reward, train_state_path)
             gc.collect()
             if hasattr(torch, 'xpu'):
                 torch.xpu.empty_cache()
-            elif torch.cuda.is_available():
-                torch.cuda.empty_cache()
         except Exception as e:
-            print(f"[Train] Episode {ep+1} 异常: {e}")
+            print(f'[Train] Episode {ep} 异常: {e}')
             continue
-    # 训练结束后关闭环境、保存模型和关闭日志
-    env.close()
-    agent.save(CONFIG['MODEL_PATH'])
     writer.close()
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+import numpy as np
 from lnn.lnn_network import LiquidNeuralNetwork
 from config import CONFIG
 
@@ -17,47 +18,51 @@ class VisionLNNAgent(nn.Module):
             self.input_shape = input_shape
             self.action_dim = action_dim
             self.lowdim_dim = lowdim_dim
+            self.action_low = -10  # 可根据环境实际调整
+            self.action_high = 10
             # --- 1. 轻量级CNN特征提取 ---
             c, h, w = input_shape
             self.cnn = nn.Sequential(
                 nn.Conv2d(c, 16, kernel_size=5, stride=2, padding=2),
                 nn.BatchNorm2d(16),
                 nn.ReLU(),
-                nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(16, 32, kernel_size=5, stride=2, padding=2),
                 nn.BatchNorm2d(32),
                 nn.ReLU(),
                 nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
                 nn.BatchNorm2d(32),
                 nn.ReLU(),
-                nn.AdaptiveAvgPool2d((3, 3))
+                nn.AdaptiveAvgPool2d((3, 3)),  # 固定空间输出
+                nn.Flatten()
             ).to(self.device)
-            cnn_feat_dim = 32 * 3 * 3
+            # 动态推断CNN输出特征维度
+            with torch.no_grad():
+                dummy = torch.zeros(1, *self.input_shape, device=self.device)
+                feat_dim = self.cnn(dummy).view(1, -1).size(1)
             # --- 1.1 低维状态编码（原有lowdim特征）---
             self.lowdim_encoder = nn.Sequential(
-                nn.Linear(lowdim_dim, 16), nn.ReLU(), nn.Linear(16, 8), nn.ReLU()
+                nn.Linear(lowdim_dim, 16), nn.ReLU(), nn.Linear(16, 8)
             ).to(self.device)
             # --- 1.2 新增：delta_pos分支 ---
             self.delta_pos_encoder = nn.Sequential(
-                nn.Linear(3, 8), nn.ReLU(), nn.Linear(8, 4), nn.ReLU()
+                nn.Linear(3, 8), nn.ReLU(), nn.Linear(8, 4)
             ).to(self.device)
             # --- 1.3 新增：target_pos分支 ---
             self.target_pos_encoder = nn.Sequential(
-                nn.Linear(3, 8), nn.ReLU(), nn.Linear(8, 4), nn.ReLU()
+                nn.Linear(3, 8), nn.ReLU(), nn.Linear(8, 4)
             ).to(self.device)
             # --- 1.4 新增：elapsed_time分支 ---
             self.elapsed_time_encoder = nn.Sequential(
-                nn.Linear(1, 4), nn.ReLU(), nn.Linear(4, 2), nn.ReLU()
+                nn.Linear(1, 4), nn.ReLU(), nn.Linear(4, 2)
             ).to(self.device)
-            # --- 2. LNN输入 ---
-            # 输入维度：cnn_feat_dim + 8 + 4 + 4 + 2 + action_dim
-            lnn_input_dim = cnn_feat_dim + 8 + 4 + 4 + 2 + action_dim
-            from lnn.lnn_network import LiquidNeuralNetwork
-            self.lnn = LiquidNeuralNetwork(input_size=lnn_input_dim, output_size=128, device=self.device)
+            # --- 2. LNN输入自动适配 ---
+            lnn_input_dim = feat_dim + 8 + 4 + 4 + 2 + action_dim
+            self.lnn = LiquidNeuralNetwork(lnn_input_dim, 128, device=self.device)
             # --- 3. LNN输出归一化 ---
             self.lnn_norm = nn.LayerNorm(128).to(self.device)
             # --- 4. 多分支决策头 ---
             self.action_head = nn.Sequential(
-                nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, action_dim)
+                nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, action_dim), nn.Tanh()
             ).to(self.device)
             self.q_head = nn.Sequential(
                 nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 1)
@@ -121,16 +126,22 @@ class VisionLNNAgent(nn.Module):
             print(f"[VisionLNNAgent] forward异常: {e}")
             raise
 
-    def select_action(self, state, epsilon=0.1):
+    def select_action(self, state, epsilon=0.1, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None):
         try:
+            action_low = getattr(self, 'action_low', -10)
+            action_high = getattr(self, 'action_high', 10)
             if random.random() < epsilon:
-                action = [random.uniform(-10, 10) for _ in range(self.action_dim)]
+                action = np.random.uniform(action_low, action_high, self.action_dim)
                 return action
-            state = state.to(self.device).float().unsqueeze(0)  # (1, C, H, W)
+            state = state.to(self.device).float().unsqueeze(0)
+            if lowdim is not None: lowdim = lowdim.to(self.device).float().view(1, -1)
+            if delta_pos is not None: delta_pos = delta_pos.to(self.device).float().view(1, -1)
+            if target_pos is not None: target_pos = target_pos.to(self.device).float().view(1, -1)
+            if elapsed_time is not None: elapsed_time = elapsed_time.to(self.device).float().view(1, -1)
             with torch.no_grad():
-                out, _ = self.forward(state)
-                action = out["action"].squeeze(0).cpu().numpy().tolist()
-            action = [min(10, max(-10, a)) for a in action]
+                out, _ = self.forward(state, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time)
+                action = out["action"].squeeze(0).cpu().numpy()
+            action = np.clip(action, action_low, action_high)
             return action
         except Exception as e:
             print(f"[VisionLNNAgent] select_action异常: {e}")
