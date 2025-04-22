@@ -338,12 +338,26 @@ def train():
                 if float(info['distance']) < 1.0:
                     total_reward += 20.0
                     done = True
-                    # 到达目标点，自动保存模型和训练状态并优雅退出
-                    print(f'[Train] 已到达目标点，保存模型与训练状态并退出')
-                    agent.save(CONFIG['MODEL_PATH'])
-                    save_train_state(replay, train_step, ep, epsilon, best_reward, CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth'))
-                    import sys
-                    sys.exit(0)
+                    # 到达目标点，判断reward
+                    min_success_reward = CONFIG.get('MIN_SUCCESS_REWARD', 50.0)
+                    if total_reward >= min_success_reward:
+                        print(f'[Train] 已到达目标点且reward={total_reward:.1f}，保存模型与训练状态并退出')
+                        agent.save(CONFIG['MODEL_PATH'])
+                        save_train_state(replay, train_step, ep, epsilon, best_reward, CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth'))
+                        import sys
+                        sys.exit(0)
+                    else:
+                        print(f'[Train] 到达目标点但reward={total_reward:.1f}过低，重置目标点继续训练')
+                        # 重新采样目标点
+                        drone_info = env.get_info()
+                        drone_pos = [float(drone_info['x']), float(drone_info['y']), float(drone_info['z'])]
+                        new_target_pos = [drone_pos[0] + np.random.uniform(80, 200), drone_pos[1] + np.random.uniform(-10, 10), drone_pos[2] + np.random.uniform(1, 3)]
+                        context['target_pos'] = new_target_pos
+                        context['init_pos'] = drone_pos
+                        context['start_time'] = time.time()
+                        min_dist = float('inf')
+                        no_progress_steps = 0
+                        continue
                 else:
                     done = False
                 reward = calc_reward(info, last_info, context, config=reward_scheduler.config, step_count=step_count)
