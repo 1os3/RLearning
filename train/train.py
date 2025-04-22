@@ -269,6 +269,16 @@ def train():
                     prev_stacked_state_tensor = torch.from_numpy(prev_stacked_state).to(device=device, dtype=torch.float32)
                 else:
                     prev_stacked_state_tensor = prev_stacked_state.to(device=device, dtype=torch.float32)
+                # 打印每步传递给模型的全部非图像输入（低维、位移、目标点、时间、隐状态等）
+                print(f"[Step {step_count}] lowdim: {lowdim_tensor.detach().cpu().numpy().round(3)}")
+                print(f"    delta_pos: {delta_pos_tensor.detach().cpu().numpy().round(3)}")
+                print(f"    target_pos: {target_pos_tensor.detach().cpu().numpy().round(3)}")
+                print(f"    elapsed_time: {elapsed_time_tensor.detach().cpu().numpy().round(3)}")
+                # 打印隐状态（如有）
+                if hasattr(agent, 'lnn') and hasattr(agent.lnn, 'h'):
+                    h_val = agent.lnn.h.detach().cpu().numpy() if agent.lnn.h is not None else None
+                    print(f"    lnn_hidden_state: {h_val}")
+                print(f"    info: speed={info.get('speed'):.3f}, pos=({info.get('x'):.2f},{info.get('y'):.2f},{info.get('z'):.2f}), target={context['target_pos']}")
                 action = select_action(agent, prev_stacked_state_tensor, epsilon, lowdim=lowdim_tensor, delta_pos=delta_pos_tensor, target_pos=target_pos_tensor, elapsed_time=elapsed_time_tensor)
                 vx, vy, vz = [float(x) for x in action] if len(action) == 3 else (0.0, 0.0, 0.0)
                 env.step(vx, vy, vz)
