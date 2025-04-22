@@ -40,7 +40,7 @@ CONFIG = {
     'PENALTY_REPEAT_TRAJ': -2.0, # 震荡/小圈惩罚
     'PENALTY_ACTION_SWITCH': -1.0, # 动作切换频繁惩罚
     'PENALTY_NO_MOVE': -20.0,    # 5分钟内未移动超过10m惩罚
-    'REWARD_APPROACH_MAX': 4.0,    # 靠近目标点方向速度最高奖励
+    'REWARD_APPROACH_MAX': 20.0,    # 靠近目标点方向速度最高奖励
     'PENALTY_AWAY_SCALE': 3.0,       # 远离目标点方向速度惩罚线性系数
 
     # 任务相关参数（目标点采样与奖励归一化）

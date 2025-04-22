@@ -171,48 +171,6 @@ def get_scheduler(optimizer):
     else:
         return None
 
-OPEN_AREA_BOUNDS = {
-    'x': (-25, 25),
-    'y': (-25, 25),
-    'z': (-4, -2)
-}
-OBSTACLE_LIST = [  # 障碍物中心点和半径，实际可根据地图自动生成
-    {'center': [0, 0, -2], 'radius': 5},
-    {'center': [10, 10, -2], 'radius': 5},
-    # ...如有更多障碍物，可补充
-]
-
-# 判断点是否在障碍物范围内
-def is_in_obstacle(pos, obstacle_list):
-    for obs in obstacle_list:
-        if np.linalg.norm(np.array(pos) - np.array(obs['center'])) < obs['radius']:
-            return True
-    return False
-
-# 随机采样一个合格的目标点
-def sample_valid_target(drone_pos, min_dist=10.0, max_trials=100):
-    for _ in range(max_trials):
-        x = random.uniform(*OPEN_AREA_BOUNDS['x'])
-        y = random.uniform(*OPEN_AREA_BOUNDS['y'])
-        z = random.uniform(*OPEN_AREA_BOUNDS['z'])
-        tgt = [x, y, z]
-        if np.linalg.norm(np.array(tgt) - np.array(drone_pos)) >= min_dist and not is_in_obstacle(tgt, OBSTACLE_LIST):
-            return tgt
-    # fallback:直接远离无人机
-    return [drone_pos[0]+min_dist, drone_pos[1], drone_pos[2]]
-
-def sample_target_in_open_area(env, drone_pos, min_dist=10.0, max_dist=20.0, max_trials=100):
-    open_points = env.get_navigable_points()
-    np.random.shuffle(open_points)
-    for tgt in open_points:
-        dist = np.linalg.norm(np.array(tgt) - np.array(drone_pos))
-        if min_dist <= dist <= max_dist:
-            return tgt
-    # fallback: 直接在无人机前方固定距离
-    direction = np.random.randn(3)
-    direction /= np.linalg.norm(direction)
-    return (np.array(drone_pos) + direction * min_dist).tolist()
-
 def build_reward_items(info, last_info, context, reward_scheduler, CONFIG):
     reward_items = {}
     distance = float(info.get('distance', 1))
@@ -320,7 +278,7 @@ def train():
             # 目标点：episode开始时唯一确定
             drone_init_info = env.get_info()
             drone_init_pos = [float(drone_init_info['x']), float(drone_init_info['y']), float(drone_init_info['z'])]
-            target_pos = [drone_init_pos[0] + 2000.0, drone_init_pos[1], drone_init_pos[2] + 2.0]
+            target_pos = [drone_init_pos[0] + 20.0, drone_init_pos[1], drone_init_pos[2] + 2.0]
             context = {
                 'last_distance': 1.0,
                 'total_distance': 0.0,
