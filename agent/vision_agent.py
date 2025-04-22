@@ -56,7 +56,7 @@ class VisionLNNAgent(nn.Module):
                 nn.Linear(1, 4), nn.ReLU(), nn.Linear(4, 2)
             ).to(self.device)
             # --- 2. LNN输入自动适配 ---
-            lnn_input_dim = feat_dim + 8 + 4 + 4 + 2 + action_dim
+            lnn_input_dim = feat_dim + 8 + 4 + 4 + 2 + 1 + action_dim
             self.lnn = LiquidNeuralNetwork(lnn_input_dim, 128, device=self.device)
             # --- 3. LNN输出归一化 ---
             self.lnn_norm = nn.LayerNorm(128).to(self.device)
@@ -75,49 +75,45 @@ class VisionLNNAgent(nn.Module):
             print(f"[VisionLNNAgent] 初始化异常: {e}")
             raise
 
-    def forward(self, state, action=None, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None, h_prev=None):
+    def forward(self, state, action=None, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None, distance=None, h_prev=None):
         try:
-            # state: (B, C, H, W)
             state = state.to(self.device).float()
             feat = self.cnn(state)
             feat = feat.view(feat.size(0), -1)
             B = state.size(0)
-            # 原有lowdim
             if lowdim is not None:
                 lowdim = lowdim.to(self.device).float().view(B, -1)
                 lowdim_feat = self.lowdim_encoder(lowdim)
             else:
                 lowdim_feat = torch.zeros((B, 8), device=self.device)
-            # delta_pos分支
             if delta_pos is not None:
                 delta_pos = delta_pos.to(self.device).float().view(B, 3)
                 delta_pos_feat = self.delta_pos_encoder(delta_pos)
             else:
                 delta_pos_feat = torch.zeros((B, 4), device=self.device)
-            # target_pos分支
             if target_pos is not None:
                 target_pos = target_pos.to(self.device).float().view(B, 3)
                 target_pos_feat = self.target_pos_encoder(target_pos)
             else:
                 target_pos_feat = torch.zeros((B, 4), device=self.device)
-            # elapsed_time分支
             if elapsed_time is not None:
                 elapsed_time = elapsed_time.to(self.device).float().view(B, 1)
                 elapsed_time_feat = self.elapsed_time_encoder(elapsed_time)
             else:
                 elapsed_time_feat = torch.zeros((B, 2), device=self.device)
-            # 动作分支
+            if distance is not None:
+                distance = distance.to(self.device).float().view(B, 1)
+            else:
+                distance = torch.zeros((B, 1), device=self.device)
             if action is not None:
                 action = action.to(self.device).float().view(B, -1)
             else:
                 action = torch.zeros((B, self.action_dim), device=self.device, dtype=state.dtype)
-            # 拼接全部特征
             lnn_in = torch.cat([
-                feat, lowdim_feat, delta_pos_feat, target_pos_feat, elapsed_time_feat, action
+                feat, lowdim_feat, delta_pos_feat, target_pos_feat, elapsed_time_feat, distance, action
             ], dim=1)
             lnn_out, h_new = self.lnn(lnn_in, h_prev)
             lnn_out = self.lnn_norm(lnn_out)
-            # --- 多分支输出 ---
             action_pred = self.action_head(lnn_out)
             q_pred = self.q_head(lnn_out)
             value_pred = self.value_head(lnn_out)
@@ -126,7 +122,7 @@ class VisionLNNAgent(nn.Module):
             print(f"[VisionLNNAgent] forward异常: {e}")
             raise
 
-    def select_action(self, state, epsilon=0.1, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None):
+    def select_action(self, state, epsilon=0.1, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None, distance=None):
         try:
             action_low = getattr(self, 'action_low', -10)
             action_high = getattr(self, 'action_high', 10)
@@ -138,8 +134,9 @@ class VisionLNNAgent(nn.Module):
             if delta_pos is not None: delta_pos = delta_pos.to(self.device).float().view(1, -1)
             if target_pos is not None: target_pos = target_pos.to(self.device).float().view(1, -1)
             if elapsed_time is not None: elapsed_time = elapsed_time.to(self.device).float().view(1, -1)
+            if distance is not None: distance = distance.to(self.device).float().view(1, -1)
             with torch.no_grad():
-                out, _ = self.forward(state, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time)
+                out, _ = self.forward(state, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time, distance=distance)
                 action = out["action"].squeeze(0).cpu().numpy()
             action = np.clip(action, action_low, action_high)
             return action
@@ -147,13 +144,12 @@ class VisionLNNAgent(nn.Module):
             print(f"[VisionLNNAgent] select_action异常: {e}")
             raise
 
-    def compute_loss(self, batch_states, batch_actions, batch_targets, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None):
+    def compute_loss(self, batch_states, batch_actions, batch_targets, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None, distance=None):
         try:
             batch_states = batch_states.to(self.device).float()
             batch_actions = batch_actions.to(self.device).float()
             batch_targets = batch_targets.to(self.device).float().view(-1)
-            # 新增：传递全部特征
-            out, _ = self.forward(batch_states, batch_actions, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time)
+            out, _ = self.forward(batch_states, batch_actions, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time, distance=distance)
             q_pred = out["q"].squeeze()
             loss = nn.functional.mse_loss(q_pred, batch_targets)
             return loss

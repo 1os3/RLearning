@@ -170,16 +170,18 @@ def collect_state(env, context, state_list):
     target_pos_tensor = torch.from_numpy(np.array(context['target_pos'], dtype=np.float32)).unsqueeze(0)
     elapsed_time = np.array([time.time() - context['start_time']], dtype=np.float32)
     elapsed_time_tensor = torch.from_numpy(elapsed_time).unsqueeze(0)
+    distance = np.array([float(info.get('distance', 0))], dtype=np.float32)
+    distance_tensor = torch.from_numpy(distance).unsqueeze(0)
     img = env.get_image()
     state = preprocess_image(img)
     state_list.pop(0)
     state_list.append(state)
     stacked_state = stack_state(state_list)
-    return (stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, info)
+    return (stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, distance_tensor, info)
 
 # ===================== 8. 模型推理与动作选择 =====================
-def select_action(agent, stacked_state, epsilon, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None):
-    return agent.select_action(stacked_state, epsilon, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time)
+def select_action(agent, stacked_state, epsilon, lowdim=None, delta_pos=None, target_pos=None, elapsed_time=None, distance=None):
+    return agent.select_action(stacked_state, epsilon, lowdim=lowdim, delta_pos=delta_pos, target_pos=target_pos, elapsed_time=elapsed_time, distance=distance)
 
 # ===================== 9. 训练主循环 =====================
 # ===================== 学习率调度器 =====================
@@ -233,6 +235,7 @@ def train():
     writer = SummaryWriter(log_dir="runs/lnn_rl")
     reward_scheduler = RewardScheduler(CONFIG.copy())
     train_step = 0  # 训练全局步数
+    exploration_steps = CONFIG.get('EXPLORATION_STEPS', 20000)
     for ep in trange(start_ep, CONFIG['MAX_EPISODES'], desc="Episode"):
         try:
             env.reset()
@@ -264,25 +267,31 @@ def train():
             no_progress_steps = 0
             for step_count in range(CONFIG['MAX_STEPS']):
                 prev_stacked_state = stacked_state.copy() if hasattr(stacked_state, 'copy') else np.copy(stacked_state)
-                stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, info = collect_state(env, context, state_list)
+                stacked_state, lowdim_tensor, delta_pos_tensor, target_pos_tensor, elapsed_time_tensor, distance_tensor, info = collect_state(env, context, state_list)
                 if isinstance(prev_stacked_state, np.ndarray):
                     prev_stacked_state_tensor = torch.from_numpy(prev_stacked_state).to(device=device, dtype=torch.float32)
                 else:
                     prev_stacked_state_tensor = prev_stacked_state.to(device=device, dtype=torch.float32)
-                # 打印每步传递给模型的全部非图像输入（低维、位移、目标点、时间、隐状态等）
+                # 打印每步传递给模型的全部非图像输入（低维、位移、目标点、时间、距离、隐状态等）
                 print(f"[Step {step_count}] lowdim: {lowdim_tensor.detach().cpu().numpy().round(3)}")
                 print(f"    delta_pos: {delta_pos_tensor.detach().cpu().numpy().round(3)}")
                 print(f"    target_pos: {target_pos_tensor.detach().cpu().numpy().round(3)}")
                 print(f"    elapsed_time: {elapsed_time_tensor.detach().cpu().numpy().round(3)}")
+                print(f"    distance: {distance_tensor.detach().cpu().numpy().round(3)}")
                 # 打印隐状态（如有）
                 if hasattr(agent, 'lnn') and hasattr(agent.lnn, 'h'):
                     h_val = agent.lnn.h.detach().cpu().numpy() if agent.lnn.h is not None else None
                     print(f"    lnn_hidden_state: {h_val}")
                 print(f"    info: speed={info.get('speed'):.3f}, pos=({info.get('x'):.2f},{info.get('y'):.2f},{info.get('z'):.2f}), target={context['target_pos']}")
-                action = select_action(agent, prev_stacked_state_tensor, epsilon, lowdim=lowdim_tensor, delta_pos=delta_pos_tensor, target_pos=target_pos_tensor, elapsed_time=elapsed_time_tensor)
+                # 动态调整epsilon，前exploration_steps步全探索
+                if train_step < exploration_steps:
+                    epsilon = 1.0
+                else:
+                    epsilon = max(CONFIG['EPSILON_END'], CONFIG['EPSILON_START'] - (train_step - exploration_steps) / CONFIG['EPSILON_DECAY'])
+                action = select_action(agent, prev_stacked_state_tensor, epsilon, lowdim=lowdim_tensor, delta_pos=delta_pos_tensor, target_pos=target_pos_tensor, elapsed_time=elapsed_time_tensor, distance=distance_tensor)
                 vx, vy, vz = [float(x) for x in action] if len(action) == 3 else (0.0, 0.0, 0.0)
                 env.step(vx, vy, vz)
-                info = env.get_info(target_pos=context['target_pos'])
+                info = env.get_info()
                 speeds.append(float(info['speed']))
                 positions.append([float(info['x']), float(info['y']), float(info['z'])])
                 actions.append(tuple(action))

@@ -14,6 +14,7 @@ CONFIG = {
     'STACK_SIZE': 4,
     'MODEL_PATH': './model/lnn_agent.pth',
     'REWARD_SPEED_MAX': 2.0,  # 最大速度奖励
+    'EXPLORATION_STEPS': 20000,  # 前2万步强制全探索（epsilon=1.0）
 
     # 学习率调度器参数
     'LR_SCHEDULER': {
@@ -35,8 +36,8 @@ CONFIG = {
     'REWARD_ATTITUDE_SCALE': 0.05, # 姿态偏离惩罚系数
     'PENALTY_COLLISION': -10.0,   # 碰撞惩罚
     'PENALTY_OFFROAD': -2.0,     # 偏离航线
-    'PENALTY_SLOW': -10.0,        # 速度过慢惩罚（大幅提升）
-    'PENALTY_STATIC': -20.0,      # 连续静止惩罚（大幅提升）
+    'PENALTY_SLOW': -20.0,        # 速度过慢惩罚（大幅提升）
+    'PENALTY_STATIC': -40.0,      # 连续静止惩罚（大幅提升）
     'PENALTY_REPEAT_TRAJ': -2.0, # 震荡/小圈惩罚
     'PENALTY_ACTION_SWITCH': -1.0, # 动作切换频繁惩罚
     'PENALTY_NO_MOVE': -20.0,    # 5分钟内未移动超过10m惩罚
