@@ -90,15 +90,18 @@ class AirSimVisionEnv:
             ori = kinematics.orientation
             # 四元数转欧拉角
             roll, pitch, yaw = airsim.to_eularian_angles(ori)
+            # 确保x, y, z被正确赋值
+            x = pos.x_val
+            y = pos.y_val
+            z = pos.z_val
             # 碰撞信息
             collision_info = self.client.simGetCollisionInfo(vehicle_name=self.vehicle_name)
             collided = collision_info.has_collided if hasattr(collision_info, 'has_collided') else False
-            # 当前位置
-            x, y, z = pos.x_val, pos.y_val, pos.z_val
             # 距离目标点
             if target_pos is not None:
-                tx, ty, tz = [float(v) for v in target_pos]
-                distance = float(np.linalg.norm(np.array([x, y, z]) - np.array([tx, ty, tz])))
+                tgt = np.array([float(v) for v in target_pos])
+                cur = np.array([x, y, z], dtype=np.float32)
+                distance = float(np.linalg.norm(cur - tgt))
             else:
                 distance = 0.0
             info = {
@@ -114,7 +117,7 @@ class AirSimVisionEnv:
                 'speed': float(np.linalg.norm([vel.x_val, vel.y_val, vel.z_val])),
                 'collision': collided,
                 'distance': distance,
-                'target_pos': target_pos  # 修复：返回目标点
+                'target_pos': target_pos  # 返回目标点
             }
             return info
         except Exception as e:

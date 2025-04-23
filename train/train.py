@@ -299,6 +299,8 @@ def train():
                     h_val = agent.lnn.h.detach().cpu().numpy() if agent.lnn.h is not None else None
                     print(f"    lnn_hidden_state: {h_val}")
                 print(f"    info: speed={info.get('speed'):.3f}, pos=({info.get('x'):.2f},{info.get('y'):.2f},{info.get('z'):.2f}), target={context['target_pos']}")
+                # 调试：打印完整的info字典检查distance
+                print(f"DEBUG - 完整info: {info}")
                 # 动态调整epsilon，前exploration_steps步全探索
                 if train_step < exploration_steps:
                     epsilon = 1.0
@@ -394,7 +396,7 @@ def train():
                 }
                 write_reward_items(writer, reward_items, global_step)
                 log_warnings(info, ep, step_count)
-                print(f"[Ep {ep+1} | Step {step_count+1}] Reward: {reward:.2f}, TotalReward: {total_reward:.2f}, Epsilon: {epsilon:.4f}, Speed: {info.get('speed', 0):.2f}, Distance: {info.get('distance', 0):.2f}, Collision: {info.get('collision', False)}, Offroad: {info.get('offroad', False)}")
+                print(f"[Ep {ep+1} | Step {step_count+1}] Reward: {reward:.2f}, TotalReward: {total_reward:.2f}, Epsilon: {epsilon:.4f}, Speed: {info.get('speed', 0):.2f}")
                 # 多步经验回放采样
                 train_times = 2
                 for _ in range(train_times):
