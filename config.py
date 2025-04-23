@@ -26,10 +26,16 @@ CONFIG = {
         'verbose': True
     },
 
+    # 目标点偏移参数
+    'TARGET_POINT_X_OFFSET': 2000.0,  # 目标点相对初始x偏移
+    'TARGET_POINT_Y_OFFSET': 0.0,    # 目标点相对初始y偏移
+    'TARGET_POINT_Z_OFFSET': 2.0,    # 目标点相对初始z偏移
+
     # 奖励机制（无人机专用，已更新）
     'REWARD_ALIVE': 0.1,         # 存活奖励
     'REWARD_DISTANCE': 3.0,      # 距离目标奖励（调低，防止静止时高reward）
-    'REWARD_SPEED_TARGET': 1.0,  # 目标速度（适中速度）
+    'REWARD_DISTANCE_MAX': 2000.0,  # 距离奖励归一化分母，必须与采样最大距离一致（与目标点采样逻辑匹配）
+    'REWARD_SPEED_TARGET': 5.0,  # 目标速度（适中速度）
     'REWARD_SPEED_SCALE': 0.2,   # 速度偏离惩罚系数
     'REWARD_Z_TARGET': -2.0,     # 理想高度
     'REWARD_Z_SCALE': 0.1,       # 高度偏离惩罚系数

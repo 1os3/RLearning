@@ -262,7 +262,12 @@ def train():
             losses = []
             drone_init_info = env.get_info()
             drone_init_pos = [float(drone_init_info['x']), float(drone_init_info['y']), float(drone_init_info['z'])]
-            target_pos = [drone_init_pos[0] + 200.0, drone_init_pos[1], drone_init_pos[2] + 2.0]
+            # 目标点初始化：完全由config.py参数控制
+            target_pos = [
+                drone_init_pos[0] + CONFIG.get('TARGET_POINT_X_OFFSET', 2000.0),
+                drone_init_pos[1] + CONFIG.get('TARGET_POINT_Y_OFFSET', 0.0),
+                drone_init_pos[2] + CONFIG.get('TARGET_POINT_Z_OFFSET', 2.0)
+            ]
             context = {
                 'target_pos': target_pos,
                 'init_pos': drone_init_pos,
@@ -342,16 +347,16 @@ def train():
                             sys.exit(0)
                         else:
                             print(f'[Train] 到达目标点但reward={total_reward:.1f}过低，重置目标点继续训练')
-                            # 重新采样目标点
-                            drone_info = env.get_info()
-                            drone_pos = [float(drone_info['x']), float(drone_info['y']), float(drone_info['z'])]
-                            new_target_pos = [drone_pos[0] + np.random.uniform(80, 200), drone_pos[1] + np.random.uniform(-10, 10), drone_pos[2] + np.random.uniform(1, 3)]
-                            context['target_pos'] = new_target_pos
-                            context['init_pos'] = drone_pos
-                            context['start_time'] = time.time()
-                            min_dist = float('inf')
-                            no_progress_steps = 0
-                            continue
+                            # 目标点重采逻辑已废弃，注释如下：
+                            # drone_info = env.get_info()
+                            # drone_pos = [float(drone_info['x']), float(drone_info['y']), float(drone_info['z'])]
+                            # new_target_pos = [drone_pos[0] + np.random.uniform(80, 200), drone_pos[1] + np.random.uniform(-10, 10), drone_pos[2] + np.random.uniform(1, 3)]
+                            # context['target_pos'] = new_target_pos
+                            # context['init_pos'] = drone_pos
+                            # context['start_time'] = time.time()
+                            # min_dist = float('inf')
+                            # no_progress_steps = 0
+                            # continue
                 else:
                     done = False
                 reward = calc_reward(info, last_info, context, config=reward_scheduler.config, step_count=step_count)
