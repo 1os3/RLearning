@@ -36,6 +36,7 @@ CONFIG = {
     'REWARD_DISTANCE': 3.0,      # 距离目标奖励（调低，防止静止时高reward）
     'REWARD_DISTANCE_MAX': 2000.0,  # 距离奖励归一化分母，必须与采样最大距离一致（与目标点采样逻辑匹配）
     'REWARD_SPEED_TARGET': 5.0,  # 目标速度（适中速度）
+    'REWARD_SPEED_NORM': 5.0,  # 速度归一化分母，需与环境最大速度一致
     'REWARD_SPEED_SCALE': 0.2,   # 速度偏离惩罚系数
     'REWARD_Z_TARGET': -2.0,     # 理想高度
     'REWARD_Z_SCALE': 0.1,       # 高度偏离惩罚系数
