@@ -396,7 +396,7 @@ def train():
                 }
                 write_reward_items(writer, reward_items, global_step)
                 log_warnings(info, ep, step_count)
-                print(f"[Ep {ep+1} | Step {step_count+1}] Reward: {reward:.2f}, TotalReward: {total_reward:.2f}, Epsilon: {epsilon:.4f}, Speed: {info.get('speed', 0):.2f}")
+                print(f"[Ep {ep+1} | Step {step_count+1}] Reward: {reward:.2f}, TotalReward: {total_reward:.2f}, Epsilon: {epsilon:.4f}, Speed: {info.get('speed', 0):.2f}, Distance: {info.get('distance', 0):.0f}, Collision: {info.get('collision', False)}, Offroad: {info.get('offroad', False)}")
                 # 多步经验回放采样
                 train_times = 2
                 for _ in range(train_times):
