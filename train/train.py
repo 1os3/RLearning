@@ -271,9 +271,6 @@ def train():
                 'action_switch': False,
                 'total_distance': 0.0,
                 'collision_count': 0,
-                # 新增静止检测字段
-                'no_move_start_time': None,
-                'no_move_distance': 0.0
             }
             speeds, positions, actions, collisions = [], [], [], []
             min_dist = float('inf')
@@ -315,18 +312,9 @@ def train():
                 context['action_switch'] = check_action_switch(actions, CONFIG)
                 context['collision_count'] = sum(collisions[-CONFIG['COLLISION_REPEAT_WINDOW']:])
                 # 静止检测逻辑
-                if float(info['speed']) < 0.05:
-                    if context['no_move_start_time'] is None:
-                        context['no_move_start_time'] = time.time()
-                        context['no_move_distance'] = 0.0
-                    else:
-                        # 计算相邻两步距离
-                        if len(positions) > 1:
-                            d = np.linalg.norm(np.array(positions[-1]) - np.array(positions[-2]))
-                            context['no_move_distance'] += d
-                else:
-                    context['no_move_start_time'] = None
-                    context['no_move_distance'] = 0.0
+                if check_static_strict(speeds, positions, CONFIG):
+                    print(f'[Train] 检测到静止（速度与累计位移均低于阈值），提前终止本集')
+                    break
                 # 距离进步检测
                 cur_dist = float(info.get('distance', 1e6))
                 if cur_dist < min_dist - 0.1:
@@ -337,12 +325,6 @@ def train():
                 # 终止条件1：500步距离无进步
                 if no_progress_steps > 500:
                     print(f'[Train] 连续500步距离未减小，提前终止本集')
-                    break
-                # 终止条件2：静止超时且累计移动距离过小
-                if (context['no_move_start_time'] is not None and
-                    (time.time() - context['no_move_start_time'] > CONFIG.get('NO_MOVE_WINDOW', 300)) and
-                    (context['no_move_distance'] < CONFIG.get('NO_MOVE_DIST', 10.0))):
-                    print(f'[Train] 超过{CONFIG.get("NO_MOVE_WINDOW", 300)}秒累计未移动{CONFIG.get("NO_MOVE_DIST", 10.0)}米，提前终止本集')
                     break
                 # 终止条件3：loss爆炸
                 if len(losses) > 0 and (np.isnan(losses[-1]) or losses[-1] > 1e4):
