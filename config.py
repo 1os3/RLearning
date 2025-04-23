@@ -14,7 +14,7 @@ CONFIG = {
     'STACK_SIZE': 4,
     'MODEL_PATH': './model/lnn_agent.pth',
     'REWARD_SPEED_MAX': 2.0,  # 最大速度奖励
-    'EXPLORATION_STEPS': 20000,  # 前2万步强制全探索（epsilon=1.0）
+    'EXPLORATION_STEPS': 40000,  # 前4万步强制全探索（更大探索池）
     'MIN_SUCCESS_REWARD': 50.0,  # 达标奖励阈值，reward低于此值时到达目标点不会保存模型而是重置目标点
 
     # 学习率调度器参数

@@ -111,6 +111,19 @@ def calc_reward(info, last_info=None, context=None, config=CONFIG, step_count=No
 def check_static(speeds, config):
     return all(s < 0.05 for s in speeds[-config['STATIC_STEPS']:]) if len(speeds) >= config['STATIC_STEPS'] else False
 
+def check_static_strict(speeds, positions, config):
+    """
+    严格静止判定：速度与累计位移双重阈值
+    """
+    if len(speeds) < config['STATIC_STEPS']:
+        return False
+    recent_speeds = speeds[-config['STATIC_STEPS']:]
+    recent_positions = positions[-config['STATIC_STEPS']:]
+    speed_static = all(abs(s) < 0.05 for s in recent_speeds)
+    dists = np.linalg.norm(np.array(recent_positions) - np.array(recent_positions[0]), axis=1)
+    move_static = np.max(dists) < config.get('MIN_TOTAL_DISTANCE', 0.5)
+    return speed_static and move_static
+
 def check_repeat_traj(positions, config):
     if len(positions) < config['REPEAT_TRAJ_WINDOW']:
         return False
