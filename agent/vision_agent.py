@@ -11,17 +11,22 @@ class VisionLNNAgent(nn.Module):
     视觉强化学习智能体，融合CNN特征提取、LNN动态建模和多分支决策头
     新增：delta_pos（相对初始点位移）、target_pos（目标点坐标）、elapsed_time（已用时间）独立分支输入
     """
-    def __init__(self, input_shape=(4, 84, 84), action_dim=3, lowdim_dim=9, device=None, lr=None):
+    def __init__(self, input_shape=None, action_dim=3, lowdim_dim=9, device=None, lr=None):
         super().__init__()
         try:
             self.device = device or (torch.device("xpu") if hasattr(torch, "xpu") and torch.xpu.is_available() else torch.device("cpu"))
+            # 动态推断输入shape
+            if input_shape is None:
+                # 默认输入shape由vision_utils.py的preprocess_image决定
+                dummy_img = np.zeros((3, 360, 640), dtype=np.float32)  # 假设最大分辨率
+                input_shape = dummy_img.shape
             self.input_shape = input_shape
             self.action_dim = action_dim
             self.lowdim_dim = lowdim_dim
             self.action_low = -10  # 可根据环境实际调整
             self.action_high = 10
             # --- 1. 轻量级CNN特征提取 ---
-            c, h, w = input_shape
+            c, h, w = self.input_shape
             self.cnn = nn.Sequential(
                 nn.Conv2d(c, 16, kernel_size=5, stride=2, padding=2),
                 nn.BatchNorm2d(16),
