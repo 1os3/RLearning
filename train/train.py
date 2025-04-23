@@ -144,7 +144,7 @@ def check_collision_repeat(collisions, config):
 # ===================== 5. 训练状态保存/恢复 =====================
 def save_train_state(replay, step_count, ep, epsilon, best_reward, path):
     torch.save({
-        'replay': replay.buffer,
+        'replay': list(replay.buffer),  # 只保存为list，兼容PyTorch 2.6+
         'step_count': step_count,
         'episode': ep,
         'epsilon': epsilon,
@@ -154,8 +154,9 @@ def save_train_state(replay, step_count, ep, epsilon, best_reward, path):
 
 def load_train_state(replay, path):
     if os.path.exists(path):
+        import collections
         state = torch.load(path)
-        replay.buffer = state['replay']
+        replay.buffer = collections.deque(state['replay'], maxlen=replay.buffer.maxlen)
         print(f'[Train] 已恢复训练状态: episode={state["episode"]}, step={state["step_count"]}, epsilon={state["epsilon"]}')
         return state['step_count'], state['episode'], state['epsilon'], state['best_reward']
     return 0, 0, CONFIG['EPSILON_START'], -float('inf')
@@ -330,29 +331,27 @@ def train():
                 if len(losses) > 0 and (np.isnan(losses[-1]) or losses[-1] > 1e4):
                     print(f'[Train] Loss爆炸，提前终止本集')
                     break
-                if float(info['distance']) < 1.0:
-                    total_reward += 20.0
-                    done = True
-                    # 到达目标点，判断reward
-                    min_success_reward = CONFIG.get('MIN_SUCCESS_REWARD', 50.0)
-                    if total_reward >= min_success_reward:
-                        print(f'[Train] 已到达目标点且reward={total_reward:.1f}，保存模型与训练状态并退出')
-                        agent.save(CONFIG['MODEL_PATH'])
-                        save_train_state(replay, train_step, ep, epsilon, best_reward, CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth'))
-                        import sys
-                        sys.exit(0)
-                    else:
-                        print(f'[Train] 到达目标点但reward={total_reward:.1f}过低，重置目标点继续训练')
-                        # 重新采样目标点
-                        drone_info = env.get_info()
-                        drone_pos = [float(drone_info['x']), float(drone_info['y']), float(drone_info['z'])]
-                        new_target_pos = [drone_pos[0] + np.random.uniform(80, 200), drone_pos[1] + np.random.uniform(-10, 10), drone_pos[2] + np.random.uniform(1, 3)]
-                        context['target_pos'] = new_target_pos
-                        context['init_pos'] = drone_pos
-                        context['start_time'] = time.time()
-                        min_dist = float('inf')
-                        no_progress_steps = 0
-                        continue
+                exploration_steps = CONFIG.get('EXPLORATION_STEPS', 20000)
+                if train_step >= exploration_steps:
+                    if info.get('distance', 1e6) < CONFIG.get('TARGET_REACH_DIST', 3.0):
+                        print(f'[Train] 到达目标点，累计奖励: {total_reward:.2f}')
+                        if total_reward >= CONFIG['MIN_SUCCESS_REWARD']:
+                            agent.save(CONFIG['MODEL_PATH'])
+                            save_train_state(replay, train_step, ep, epsilon, best_reward, CONFIG.get('TRAIN_STATE_PATH', 'train_state.pth'))
+                            import sys
+                            sys.exit(0)
+                        else:
+                            print(f'[Train] 到达目标点但reward={total_reward:.1f}过低，重置目标点继续训练')
+                            # 重新采样目标点
+                            drone_info = env.get_info()
+                            drone_pos = [float(drone_info['x']), float(drone_info['y']), float(drone_info['z'])]
+                            new_target_pos = [drone_pos[0] + np.random.uniform(80, 200), drone_pos[1] + np.random.uniform(-10, 10), drone_pos[2] + np.random.uniform(1, 3)]
+                            context['target_pos'] = new_target_pos
+                            context['init_pos'] = drone_pos
+                            context['start_time'] = time.time()
+                            min_dist = float('inf')
+                            no_progress_steps = 0
+                            continue
                 else:
                     done = False
                 reward = calc_reward(info, last_info, context, config=reward_scheduler.config, step_count=step_count)

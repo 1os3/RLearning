@@ -1,5 +1,4 @@
 # 全局配置文件，集中管理超参数和奖励机制
-
 CONFIG = {
     # 训练参数
     'MAX_EPISODES': 2000,
@@ -41,16 +40,8 @@ CONFIG = {
     'PENALTY_STATIC': -40.0,      # 连续静止惩罚（大幅提升）
     'PENALTY_REPEAT_TRAJ': -2.0, # 震荡/小圈惩罚
     'PENALTY_ACTION_SWITCH': -1.0, # 动作切换频繁惩罚
-    'PENALTY_NO_MOVE': -20.0,    # 5分钟内未移动超过10m惩罚
     'REWARD_APPROACH_MAX': 10.0,    # 靠近目标点方向速度最高奖励（大幅提升）
     'PENALTY_AWAY_SCALE': 10.0,     # 远离目标点方向速度惩罚（大幅提升）
-
-    # 任务相关参数（目标点采样与奖励归一化）
-    'TARGET_DIST_MIN': 10.0,        # 目标点采样最小距离
-    'TARGET_DIST_MAX': 200.0,      # 目标点采样最大距离（与train.py一致）
-    'REWARD_DISTANCE_MAX': 200.0,  # 距离奖励归一化分母，必须与采样最大距离一致
-    'REWARD_SPEED_NORM': 5.0,       # 速度归一化分母
-    'REWARD_APPROACH_MAX_SPEED': 5.0, # 靠近目标奖励归一化分母
 
     # 轨迹检测参数
     'STATIC_STEPS': 10,          # 连续静止步数阈值
@@ -58,8 +49,6 @@ CONFIG = {
     'COLLISION_REPEAT_WINDOW': 10, # 碰撞重复检测窗口
     'ACTION_SWITCH_WINDOW': 5,   # 动作切换检测窗口
     'MIN_TOTAL_DISTANCE': 0.5,   # 静止判定最小累计距离
-    'NO_MOVE_WINDOW': 300,        # 5分钟内未移动超过10m惩罚窗口
-    'NO_MOVE_DIST': 10.0,        # 5分钟内未移动超过10m惩罚距离
 
     # 推理参数
     'INFER_RENDER': True,
