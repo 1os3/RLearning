@@ -15,6 +15,7 @@ CONFIG = {
     'REWARD_SPEED_MAX': 2.0,  # 最大速度奖励
     'EXPLORATION_STEPS': 40000,  # 前4万步强制全探索（更大探索池）
     'MIN_SUCCESS_REWARD': 50.0,  # 达标奖励阈值，reward低于此值时到达目标点不会保存模型而是重置目标点
+    'TRAIN_STATE_PATH': './model/train_state.pth',  # 训练状态保存路径
 
     # 学习率调度器参数
     'LR_SCHEDULER': {
