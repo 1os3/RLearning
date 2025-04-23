@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 *.log
 runs/
+model/
+train_state.pth
